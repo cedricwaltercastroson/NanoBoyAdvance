@@ -349,6 +349,7 @@ void PPU::UpdateScanline() {
     if (cycle == 0) {
       // TODO: think about what happens if BGHOFS&7==0.
       if (bg.grid_x == 31) {
+        bg.enabled = false;
         goto skip;
       }
 
@@ -451,7 +452,7 @@ void PPU::UpdateScanline() {
       } else if (cycle & 1) {
         // TODO: it could be that the four pixels are output over multiple (two?) cycles.
         // In that case it wouldn't be sufficient to output all pixels at once.
-        if (bg.enabled && mmio.dispcnt.enable[id]) {        
+        if (bg.enabled && mmio.dispcnt.enable[id]) {
           auto data = read<u16>(vram, address);
           auto flip = bg.flip_x ? 3 : 0;
           auto draw_x = bg.draw_x;
