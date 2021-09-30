@@ -102,6 +102,8 @@ void PPU::OnScanlineComplete(int cycles_late) {
 
   scheduler.Add(226 - cycles_late, this, &PPU::OnHblankComplete);
 
+  UpdateScanline();
+
   mmio.dispstat.hblank_flag = 1;
 
   if (mmio.dispstat.hblank_irq_enable) {
@@ -197,7 +199,7 @@ void PPU::OnHblankComplete(int cycles_late) {
     bgy[1]._current = bgy[1].initial;
   } else {
     scheduler.Add(1006 - cycles_late, this, &PPU::OnScanlineComplete);
-    RenderScanline();
+    BeginScanline();
     // Render OBJs for the next scanline.
     if (mmio.dispcnt.enable[ENABLE_OBJ]) {
       RenderLayerOAM(mmio.dispcnt.mode >= 3, mmio.vcount + 1);
@@ -259,7 +261,7 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
   }
 
   if (vcount == 0) {
-    RenderScanline();
+    BeginScanline();
     // Render OBJs for the next scanline
     if (mmio.dispcnt.enable[ENABLE_OBJ]) {
       RenderLayerOAM(mmio.dispcnt.mode >= 3, 1);
@@ -267,6 +269,235 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
   }
 
   CheckVerticalCounterIRQ();
+}
+
+void PPU::BeginScanline() {
+  auto& dispcnt = mmio.dispcnt;
+
+  if (dispcnt.mode == 0) {
+    renderer.time = 0;
+    for (int i = 0; i < 4; i++) {
+      renderer.bg[i].grid_x = 0;
+      renderer.bg[i].draw_x = -(mmio.bghofs[i] & 7);
+
+      for (int x = 0; x < 240; x++) {
+        buffer_bg[i][x] = s_color_transparent;
+      }
+    }
+    renderer.timestamp = scheduler.GetTimestampNow();
+  } else {
+    RenderScanline();
+  }
+}
+
+void PPU::UpdateScanline() {
+  if (mmio.dispstat.hblank_flag || mmio.dispstat.vblank_flag) {
+    return;
+  }
+
+  auto cycles = int(scheduler.GetTimestampNow() - renderer.timestamp);
+
+  renderer.timestamp = scheduler.GetTimestampNow();
+
+  while (cycles-- > 0) {
+    auto cycle = renderer.time & 7;
+    auto id = (renderer.time & 31) >> 3;
+
+    /*
+     * Access patterns (current theory):
+     *
+     * ------- TEXT MODE -------
+     *   8BPP:
+     *    #0 - fetch map
+     *    #1 - fetch pixels #0 - #1 (16-bit)
+     *    #2 - fetch pixels #2 - #3 (16-bit)
+     *    #3 - fetch pixels #4 - #5 (16-bit)
+     *    #4 - fetch pixels #6 - #7 (16-bit)
+     *    #N - idle
+     *
+     *   4BPP:
+     *    #0 - fetch map 
+     *    #1 - fetch pixels #0 - #3 (16-bit)
+     *    #2 - idle
+     *    #3 - fetch pixels #4 - #7 (16-bit)
+     *    #4 - idle
+     *    #N - idle
+     *
+     * ------- AFFINE TEXT MDOE -------
+     *   4BPP/8BPP:
+     *    # 0 - fetch map 
+     *    # 1 - fetch single pixel
+     *    # 2 - fetch map
+     *    # 3 - fetch single pixel
+     *    # 4 - fetch map
+     *    # 5 - fetch single pixel
+     *    # 6 - fetch map
+     *    # 7 - fetch single pixel
+     *    # 8 - fetch map 
+     *    # 9 - fetch single pixel
+     *    #10 - fetch map
+     *    #11 - fetch single pixel
+     *    #12 - fetch map
+     *    #13 - fetch single pixel
+     *    #14 - fetch map
+     *    #15 - fetch single pixel
+     *
+     */
+
+    auto& bg = renderer.bg[id];
+
+    if (cycle == 0) {
+      // TODO: think about what happens if BGHOFS&7==0.
+      if (bg.grid_x == 31) {
+        goto skip;
+      }
+
+      bg.enabled = mmio.dispcnt.enable[id];
+
+      if (bg.enabled) {
+        auto& bgcnt  = mmio.bgcnt[id];
+        auto tile_base = bgcnt.tile_block << 14;
+        auto map_block = bgcnt.map_block;
+
+        auto line = mmio.bgvofs[id] + mmio.vcount;
+    
+        auto grid_x = (mmio.bghofs[id] >> 3) + bg.grid_x;
+        auto grid_y = line >> 3;
+        auto tile_y = line & 7;
+
+        auto screen_x = (grid_x >> 5) & 1;
+        auto screen_y = (grid_y >> 5) & 1;
+
+        switch (bgcnt.size) {
+          case 1:
+            map_block += screen_x;
+            break;
+          case 2:
+            map_block += screen_y;
+            break;
+          case 3:
+            map_block += screen_x;
+            map_block += screen_y << 1;
+            break;
+        }
+
+        auto address = (map_block << 11) + ((grid_y & 31) << 6) + ((grid_x & 31) << 1);
+
+        auto map_entry = read<u16>(vram, address);
+        auto number = map_entry & 0x3FF;
+        auto palette = map_entry >> 12;
+        bool flip_x = map_entry & (1 << 10);
+        bool flip_y = map_entry & (1 << 11);
+
+        if (flip_y) tile_y ^= 7;
+
+        bg.palette = (u16*)&pram[palette << 5];
+        bg.full_palette = bgcnt.full_palette;
+        bg.flip_x = flip_x;
+
+        if (bgcnt.full_palette) {
+          bg.address = tile_base + (number << 6) + (tile_y << 3);
+          if (flip_x) {
+            bg.address += 6;
+          }
+        } else {
+          bg.address = tile_base + (number << 5) + (tile_y << 2);
+          if (flip_x) {
+            bg.address += 2;
+          }
+        }
+      }
+
+      bg.grid_x++;
+    } else if (cycle <= 4) {
+      auto& address = bg.address;
+
+      if (bg.full_palette) {
+        if (bg.enabled && mmio.dispcnt.enable[id]) {        
+          auto data = read<u16>(vram, address);
+          auto flip = bg.flip_x ? 1 : 0;
+          auto draw_x = bg.draw_x;
+          auto palette = (u16*)pram;
+
+          for (int x = 0; x < 2; x++) {
+            u16 color;
+            u8 index = u8(data);
+
+            if (index == 0) {
+              color = s_color_transparent;
+            } else {
+              color = palette[index];
+            }
+
+            // TODO: optimise this!!!
+            // Solution: make BG buffer bigger to allow for overflow on each side!
+            auto final_x = draw_x + (x ^ flip);
+            if (final_x >= 0 && final_x <= 239) {
+              buffer_bg[id][final_x] = color;
+            }
+
+            data >>= 8;
+          }
+        }
+        
+        bg.draw_x += 2;
+        
+        // TODO: test if the address is updated if the BG is disabled.
+        if (bg.flip_x) {
+          address -= sizeof(u16);
+        } else {
+          address += sizeof(u16);
+        }
+      } else if (cycle & 1) {
+        // TODO: it could be that the four pixels are output over multiple (two?) cycles.
+        // In that case it wouldn't be sufficient to output all pixels at once.
+        if (bg.enabled && mmio.dispcnt.enable[id]) {        
+          auto data = read<u16>(vram, address);
+          auto flip = bg.flip_x ? 3 : 0;
+          auto draw_x = bg.draw_x;
+          auto palette = bg.palette;
+
+          for (int x = 0; x < 4; x++) {
+            u16 color;
+            u16 index = data & 15;
+
+            if (index == 0) {
+              color = s_color_transparent;
+            } else {
+              color = palette[index];
+            }
+
+            // TODO: optimise this!!!
+            // Solution: make BG buffer bigger to allow for overflow on each side!
+            auto final_x = draw_x + (x ^ flip);
+            if (final_x >= 0 && final_x <= 239) {
+              buffer_bg[id][final_x] = color;
+            }
+
+            data >>= 4;
+          }
+        }
+        
+        bg.draw_x += 4;
+        
+        // TODO: test if the address is updated if the BG is disabled.
+        if (bg.flip_x) {
+          address -= sizeof(u16);
+        } else {
+          address += sizeof(u16);
+        }
+      }
+    }
+
+skip:
+    renderer.time++;
+  
+    // TODO: implement this in a better way.
+    if (renderer.time == 1006) {
+      // TODO: perform horizontal mosaic operation.
+      ComposeScanline(0, 3);
+    }
+  }
 }
 
 } // namespace nba::core

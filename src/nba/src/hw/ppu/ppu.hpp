@@ -68,6 +68,8 @@ struct PPU {
     } else {
       write<T>(vram, address, value);
     }
+
+    UpdateScanline(); // sloooow
   }
 
   template<typename T>
@@ -115,6 +117,7 @@ struct PPU {
   bool enable_bg[2][4];
 
 private:
+  friend struct DisplayControl;
   friend struct DisplayStatus;
 
   enum ObjAttribute {
@@ -166,6 +169,9 @@ private:
   void RenderLayerOAM(bool bitmap_mode, int line);
   void RenderWindow(int id);
 
+  void BeginScanline();
+  void UpdateScanline();
+
   static auto ConvertColor(u16 color) -> u32;
 
   template<bool window, bool blending>
@@ -185,6 +191,21 @@ private:
   std::shared_ptr<Config> config;
 
   u16 buffer_bg[4][240];
+
+  struct Renderer {
+    int time;
+    struct BG {
+      bool enabled;
+      int grid_x;
+      int draw_x;
+      u32 address;
+      u16* palette;
+      bool flip_x;
+      bool full_palette;
+    } bg[4];
+
+    u64 timestamp;
+  } renderer;
 
   bool line_contains_alpha_obj;
 

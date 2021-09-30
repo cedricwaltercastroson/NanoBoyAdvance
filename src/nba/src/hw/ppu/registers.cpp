@@ -54,6 +54,11 @@ void DisplayControl::Write(int address, u8 value) {
       }
       break;
   }
+
+  /* TODO: this is fundametally broken, as MMIO writes are broken down
+   * into multiple byte accesses!
+   */
+  ppu->UpdateScanline();
 }
 
 void DisplayStatus::Reset() {
