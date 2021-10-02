@@ -171,7 +171,10 @@ private:
 
   void BeginScanline();
   void UpdateScanline();
+  void UpdateTextLayer(int id, int cycle);
+  void UpdateAffineLayer(int id, int cycle);
   void UpdateScanlineMode0(int cycles);
+  void UpdateScanlineMode1(int cycles);
   void UpdateScanlineMode2(int cycles);
 
   static auto ConvertColor(u16 color) -> u32;
@@ -198,11 +201,11 @@ private:
     int time;
     struct BG {
       bool enabled;
+      int draw_x;
       u32 address;
-
+      
       // text mode
       int grid_x;
-      int draw_x;
       u16* palette;
       bool flip_x;
       bool full_palette;
@@ -210,8 +213,6 @@ private:
       // affine mode
       s32 ref_x;
       s32 ref_y;
-      s16 pa;
-      s16 pc;
     } bg[4];
 
     u64 timestamp;

@@ -288,12 +288,11 @@ void PPU::BeginScanline() {
 
       // Affine modes
       if (i >= 2) {
+        if (dispcnt.mode != 0) {
+          bg.draw_x = 0; // ugh
+        }
         bg.ref_x = mmio.bgx[i & 1]._current;
         bg.ref_y = mmio.bgy[i & 1]._current;
-        
-        // TODO: are PA/PC latched or can they be changed during the scanline?
-        bg.pa = mmio.bgpa[i & 1];
-        bg.pc = mmio.bgpc[i & 1];
       }
 
       for (int x = 0; x < 240; x++) {
@@ -318,7 +317,9 @@ void PPU::UpdateScanline() {
     case 0:
       UpdateScanlineMode0(cycles);
       break;
-    case 1: // fixme!
+    case 1:
+      UpdateScanlineMode1(cycles);
+      break;
     case 2:
       UpdateScanlineMode2(cycles);
       break;
@@ -329,7 +330,9 @@ void PPU::UpdateScanline() {
   renderer.timestamp = scheduler.GetTimestampNow();
 }
 
-void PPU::UpdateScanlineMode0(int cycles) {
+void PPU::UpdateTextLayer(int id, int cycle) {
+  auto& bg = renderer.bg[id];
+
   /*
    * Access patterns (current theory):
    *
@@ -350,165 +353,157 @@ void PPU::UpdateScanlineMode0(int cycles) {
    *    #N - idle
    */
 
-  while (cycles-- > 0) {
-    auto cycle = renderer.time & 7;
-    auto id = (renderer.time & 31) >> 3;
-    auto& bg = renderer.bg[id];
+  if (cycle == 0) {
+    // TODO: think about what happens if BGHOFS&7==0.
+    if (bg.grid_x == 31) {
+      bg.enabled = false;
+      return;
+    }
 
-    if (cycle == 0) {
-      // TODO: think about what happens if BGHOFS&7==0.
-      if (bg.grid_x == 31) {
-        bg.enabled = false;
-        goto skip;
+    bg.enabled = mmio.dispcnt.enable[id];
+
+    if (bg.enabled) {
+      auto& bgcnt  = mmio.bgcnt[id];
+      auto tile_base = bgcnt.tile_block << 14;
+      auto map_block = bgcnt.map_block;
+
+      auto line = mmio.bgvofs[id] + mmio.vcount;
+  
+      auto grid_x = (mmio.bghofs[id] >> 3) + bg.grid_x;
+      auto grid_y = line >> 3;
+      auto tile_y = line & 7;
+
+      auto screen_x = (grid_x >> 5) & 1;
+      auto screen_y = (grid_y >> 5) & 1;
+
+      switch (bgcnt.size) {
+        case 1:
+          map_block += screen_x;
+          break;
+        case 2:
+          map_block += screen_y;
+          break;
+        case 3:
+          map_block += screen_x;
+          map_block += screen_y << 1;
+          break;
       }
 
-      bg.enabled = mmio.dispcnt.enable[id];
+      auto address = (map_block << 11) + ((grid_y & 31) << 6) + ((grid_x & 31) << 1);
 
-      if (bg.enabled) {
-        auto& bgcnt  = mmio.bgcnt[id];
-        auto tile_base = bgcnt.tile_block << 14;
-        auto map_block = bgcnt.map_block;
+      auto map_entry = read<u16>(vram, address);
+      auto number = map_entry & 0x3FF;
+      auto palette = map_entry >> 12;
+      bool flip_x = map_entry & (1 << 10);
+      bool flip_y = map_entry & (1 << 11);
 
-        auto line = mmio.bgvofs[id] + mmio.vcount;
-    
-        auto grid_x = (mmio.bghofs[id] >> 3) + bg.grid_x;
-        auto grid_y = line >> 3;
-        auto tile_y = line & 7;
+      if (flip_y) tile_y ^= 7;
 
-        auto screen_x = (grid_x >> 5) & 1;
-        auto screen_y = (grid_y >> 5) & 1;
+      bg.palette = (u16*)&pram[palette << 5];
+      bg.full_palette = bgcnt.full_palette;
+      bg.flip_x = flip_x;
 
-        switch (bgcnt.size) {
-          case 1:
-            map_block += screen_x;
-            break;
-          case 2:
-            map_block += screen_y;
-            break;
-          case 3:
-            map_block += screen_x;
-            map_block += screen_y << 1;
-            break;
+      if (bgcnt.full_palette) {
+        bg.address = tile_base + (number << 6) + (tile_y << 3);
+        if (flip_x) {
+          bg.address += 6;
         }
-
-        auto address = (map_block << 11) + ((grid_y & 31) << 6) + ((grid_x & 31) << 1);
-
-        auto map_entry = read<u16>(vram, address);
-        auto number = map_entry & 0x3FF;
-        auto palette = map_entry >> 12;
-        bool flip_x = map_entry & (1 << 10);
-        bool flip_y = map_entry & (1 << 11);
-
-        if (flip_y) tile_y ^= 7;
-
-        bg.palette = (u16*)&pram[palette << 5];
-        bg.full_palette = bgcnt.full_palette;
-        bg.flip_x = flip_x;
-
-        if (bgcnt.full_palette) {
-          bg.address = tile_base + (number << 6) + (tile_y << 3);
-          if (flip_x) {
-            bg.address += 6;
-          }
-        } else {
-          bg.address = tile_base + (number << 5) + (tile_y << 2);
-          if (flip_x) {
-            bg.address += 2;
-          }
-        }
-      }
-
-      bg.grid_x++;
-    } else if (cycle <= 4) {
-      auto& address = bg.address;
-
-      if (bg.full_palette) {
-        if (bg.enabled && mmio.dispcnt.enable[id]) {        
-          auto data = read<u16>(vram, address);
-          auto flip = bg.flip_x ? 1 : 0;
-          auto draw_x = bg.draw_x;
-          auto palette = (u16*)pram;
-
-          for (int x = 0; x < 2; x++) {
-            u16 color;
-            u8 index = u8(data);
-
-            if (index == 0) {
-              color = s_color_transparent;
-            } else {
-              color = palette[index];
-            }
-
-            // TODO: optimise this!!!
-            // Solution: make BG buffer bigger to allow for overflow on each side!
-            auto final_x = draw_x + (x ^ flip);
-            if (final_x >= 0 && final_x <= 239) {
-              buffer_bg[id][final_x] = color;
-            }
-
-            data >>= 8;
-          }
-        }
-        
-        bg.draw_x += 2;
-        
-        // TODO: test if the address is updated if the BG is disabled.
-        if (bg.flip_x) {
-          address -= sizeof(u16);
-        } else {
-          address += sizeof(u16);
-        }
-      } else if (cycle & 1) {
-        // TODO: it could be that the four pixels are output over multiple (two?) cycles.
-        // In that case it wouldn't be sufficient to output all pixels at once.
-        if (bg.enabled && mmio.dispcnt.enable[id]) {
-          auto data = read<u16>(vram, address);
-          auto flip = bg.flip_x ? 3 : 0;
-          auto draw_x = bg.draw_x;
-          auto palette = bg.palette;
-
-          for (int x = 0; x < 4; x++) {
-            u16 color;
-            u16 index = data & 15;
-
-            if (index == 0) {
-              color = s_color_transparent;
-            } else {
-              color = palette[index];
-            }
-
-            // TODO: optimise this!!!
-            // Solution: make BG buffer bigger to allow for overflow on each side!
-            auto final_x = draw_x + (x ^ flip);
-            if (final_x >= 0 && final_x <= 239) {
-              buffer_bg[id][final_x] = color;
-            }
-
-            data >>= 4;
-          }
-        }
-        
-        bg.draw_x += 4;
-        
-        // TODO: test if the address is updated if the BG is disabled.
-        if (bg.flip_x) {
-          address -= sizeof(u16);
-        } else {
-          address += sizeof(u16);
+      } else {
+        bg.address = tile_base + (number << 5) + (tile_y << 2);
+        if (flip_x) {
+          bg.address += 2;
         }
       }
     }
 
-skip:
-    // TODO: implement this in a better way.
-    if (++renderer.time == 1006) {
-      // TODO: perform horizontal mosaic operation.
-      ComposeScanline(0, 3);
+    bg.grid_x++;
+  } else if (cycle <= 4) {
+    auto& address = bg.address;
+
+    if (bg.full_palette) {
+      if (bg.enabled && mmio.dispcnt.enable[id]) {        
+        auto data = read<u16>(vram, address);
+        auto flip = bg.flip_x ? 1 : 0;
+        auto draw_x = bg.draw_x;
+        auto palette = (u16*)pram;
+
+        for (int x = 0; x < 2; x++) {
+          u16 color;
+          u8 index = u8(data);
+
+          if (index == 0) {
+            color = s_color_transparent;
+          } else {
+            color = palette[index];
+          }
+
+          // TODO: optimise this!!!
+          // Solution: make BG buffer bigger to allow for overflow on each side!
+          auto final_x = draw_x + (x ^ flip);
+          if (final_x >= 0 && final_x <= 239) {
+            buffer_bg[id][final_x] = color;
+          }
+
+          data >>= 8;
+        }
+      }
+      
+      bg.draw_x += 2;
+      
+      // TODO: test if the address is updated if the BG is disabled.
+      if (bg.flip_x) {
+        address -= sizeof(u16);
+      } else {
+        address += sizeof(u16);
+      }
+    } else if (cycle & 1) {
+      // TODO: it could be that the four pixels are output over multiple (two?) cycles.
+      // In that case it wouldn't be sufficient to output all pixels at once.
+      if (bg.enabled && mmio.dispcnt.enable[id]) {
+        auto data = read<u16>(vram, address);
+        auto flip = bg.flip_x ? 3 : 0;
+        auto draw_x = bg.draw_x;
+        auto palette = bg.palette;
+
+        for (int x = 0; x < 4; x++) {
+          u16 color;
+          u16 index = data & 15;
+
+          if (index == 0) {
+            color = s_color_transparent;
+          } else {
+            color = palette[index];
+          }
+
+          // TODO: optimise this!!!
+          // Solution: make BG buffer bigger to allow for overflow on each side!
+          auto final_x = draw_x + (x ^ flip);
+          if (final_x >= 0 && final_x <= 239) {
+            buffer_bg[id][final_x] = color;
+          }
+
+          data >>= 4;
+        }
+      }
+      
+      bg.draw_x += 4;
+      
+      // TODO: test if the address is updated if the BG is disabled.
+      if (bg.flip_x) {
+        address -= sizeof(u16);
+      } else {
+        address += sizeof(u16);
+      }
     }
   }
 }
 
-void PPU::UpdateScanlineMode2(int cycles) {
+void PPU::UpdateAffineLayer(int id, int cycle) {
+  auto& bg = renderer.bg[id];
+  auto& bgcnt = mmio.bgcnt[id];
+  auto& pa = mmio.bgpa[id & 1];
+  auto& pc = mmio.bgpc[id & 1];
+
   /*
    * Access pattern (current theory):
    *
@@ -531,83 +526,114 @@ void PPU::UpdateScanlineMode2(int cycles) {
    *    #15 - fetch single pixel
    */
 
-  while (cycles-- > 0) {
-    auto cycle = renderer.time & 1;
-    auto id = 2 + ((renderer.time >> 4) & 1);
-    auto& bg = renderer.bg[id];
-    auto& bgcnt = mmio.bgcnt[id];
-
-    if (renderer.time == 0) {
-      // TODO: handle this properly...
-      bg.draw_x = 0;
+  if (cycle == 0) {
+    // TODO: implement this in a better way...
+    if (bg.draw_x == 240) {
+      bg.enabled = false;
+      return;
     }
 
-    if (cycle == 0) {
-      // TODO: implement this in a better way...
-      if (bg.draw_x == 240) {
-        bg.enabled = false;
-        goto skip;
-      }
+    bg.enabled = mmio.dispcnt.enable[id];
 
-      bg.enabled = mmio.dispcnt.enable[id];
+    if (bg.enabled) {
+      auto x = bg.ref_x >> 8;
+      auto y = bg.ref_y >> 8;
+
+      bg.ref_x += pa;
+      bg.ref_y += pc;
+
+      auto size = 128 << bgcnt.size;
+
+      // TODO: optimise this...
+      if (bgcnt.wraparound) {
+        if (x >= size) {
+          x %= size;
+        } else if (x < 0) {
+          x = size + (x % size);
+        }
+        
+        if (y >= size) {
+          y %= size;
+        } else if (y < 0) {
+          y = size + (y % size);
+        }
+      } else if (x >= size || y >= size || x < 0 || y < 0) {
+        bg.enabled = false;
+      }
 
       if (bg.enabled) {
-        auto x = bg.ref_x >> 8;
-        auto y = bg.ref_y >> 8;
+        auto map_base  = bgcnt.map_block << 11;
+        auto tile_base = bgcnt.tile_block << 14;
+        auto number = vram[map_base + ((y >> 3) << (4 + bgcnt.size)) + (x >> 3)];
 
-        bg.ref_x += bg.pa;
-        bg.ref_y += bg.pc;
-
-        auto size = 128 << bgcnt.size;
-
-        // TODO: optimise this...
-        if (bgcnt.wraparound) {
-          if (x >= size) {
-            x %= size;
-          } else if (x < 0) {
-            x = size + (x % size);
-          }
-          
-          if (y >= size) {
-            y %= size;
-          } else if (y < 0) {
-            y = size + (y % size);
-          }
-        } else if (x >= size || y >= size || x < 0 || y < 0) {
-          bg.enabled = false;
-        }
-
-        if (bg.enabled) {
-          auto map_base  = bgcnt.map_block << 11;
-          auto tile_base = bgcnt.tile_block << 14;
-          auto number = vram[map_base + ((y >> 3) << (4 + bgcnt.size)) + (x >> 3)];
-
-          bg.address = tile_base + (number << 6) + ((y & 7) << 3) + (x & 7);
-        }
-      }      
-    } else {
-      u16 color = s_color_transparent;
-
-      if (bg.enabled && mmio.dispcnt.enable[id]) {
-        u8 index = vram[bg.address];
-        if (index != 0) {
-          color = read<u16>(pram, index << 1);
-        }
+        bg.address = tile_base + (number << 6) + ((y & 7) << 3) + (x & 7);
       }
+    }      
+  } else {
+    u16 color = s_color_transparent;
 
-      if (bg.draw_x < 240) {
-        buffer_bg[id][bg.draw_x++] = color;
+    if (bg.enabled && mmio.dispcnt.enable[id]) {
+      u8 index = vram[bg.address];
+      if (index != 0) {
+        color = read<u16>(pram, index << 1);
       }
     }
 
-skip:
+    if (bg.draw_x < 240) {
+      buffer_bg[id][bg.draw_x++] = color;
+    }
+  }
+
+}
+
+void PPU::UpdateScanlineMode0(int cycles) {
+  while (cycles-- > 0) {
+    auto id = (renderer.time & 31) >> 3;
+    auto cycle = renderer.time & 7;
+    
+    UpdateTextLayer(id, cycle);
+
     // TODO: implement this in a better way.
+    // TODO: perform horizontal mosaic operation.
     if (++renderer.time == 1006) {
-      // TODO: perform horizontal mosaic operation.
       ComposeScanline(0, 3);
     }
   }
 }
 
+void PPU::UpdateScanlineMode1(int cycles) {
+  while (cycles-- > 0) {
+    auto id = (renderer.time & 31) >> 3;
+
+    if (id <= 1) {
+      auto cycle = renderer.time & 7;
+      UpdateTextLayer(id, cycle);
+    } else {
+      auto cycle = renderer.time & 1;
+      UpdateAffineLayer(2, cycle);
+    }
+
+    // TODO: implement this in a better way.
+    // TODO: perform horizontal mosaic operation.
+    if (++renderer.time == 1006) {
+      ComposeScanline(0, 3);
+    }
+  }
+}
+
+void PPU::UpdateScanlineMode2(int cycles) {
+  while (cycles-- > 0) {
+    auto id = 2 + ((renderer.time >> 4) & 1);
+    auto cycle = renderer.time & 1;
+
+    UpdateAffineLayer(id, cycle);
+    
+    // TODO: implement this in a better way.
+    // TODO: perform horizontal mosaic operation.
+    if (++renderer.time == 1006) {
+      ComposeScanline(0, 3);
+    }
+  }
+}
 
 } // namespace nba::core
