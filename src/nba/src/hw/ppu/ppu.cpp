@@ -533,7 +533,7 @@ void PPU::UpdateScanlineMode2(int cycles) {
 
   while (cycles-- > 0) {
     auto cycle = renderer.time & 1;
-    auto id = 2 + ((renderer.time >> 4) & 2);
+    auto id = 2 + ((renderer.time >> 4) & 1);
     auto& bg = renderer.bg[id];
     auto& bgcnt = mmio.bgcnt[id];
 
@@ -588,7 +588,7 @@ void PPU::UpdateScanlineMode2(int cycles) {
     } else {
       u16 color = s_color_transparent;
 
-      if (bg.enabled) {
+      if (bg.enabled && mmio.dispcnt.enable[id]) {
         u8 index = vram[bg.address];
         if (index != 0) {
           color = read<u16>(pram, index << 1);
