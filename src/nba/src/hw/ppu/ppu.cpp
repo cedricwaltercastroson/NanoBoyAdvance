@@ -274,11 +274,27 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
 void PPU::BeginScanline() {
   auto& dispcnt = mmio.dispcnt;
 
-  if (dispcnt.mode == 0) {
+  if (dispcnt.mode <= 2) {
     renderer.time = 0;
+
     for (int i = 0; i < 4; i++) {
-      renderer.bg[i].grid_x = 0;
-      renderer.bg[i].draw_x = -(mmio.bghofs[i] & 7);
+      auto& bg = renderer.bg[i];
+
+      // TODO: only run what is necessary for the current mode.
+
+      // Text mode
+      bg.grid_x = 0;
+      bg.draw_x = -(mmio.bghofs[i] & 7);
+
+      // Affine modes
+      if (i >= 2) {
+        bg.ref_x = mmio.bgx[i & 1]._current;
+        bg.ref_y = mmio.bgy[i & 1]._current;
+        
+        // TODO: are PA/PC latched or can they be changed during the scanline?
+        bg.pa = mmio.bgpa[i & 1];
+        bg.pc = mmio.bgpc[i & 1];
+      }
 
       for (int x = 0; x < 240; x++) {
         buffer_bg[i][x] = s_color_transparent;
@@ -295,55 +311,48 @@ void PPU::UpdateScanline() {
     return;
   }
 
+  auto mode = mmio.dispcnt.mode;
   auto cycles = int(scheduler.GetTimestampNow() - renderer.timestamp);
 
+  switch (mode) {
+    case 0:
+      UpdateScanlineMode0(cycles);
+      break;
+    case 1: // fixme!
+    case 2:
+      UpdateScanlineMode2(cycles);
+      break;
+    default:
+      Assert(false, "PPU: unimplemented mode {}", mode);
+  }
+
   renderer.timestamp = scheduler.GetTimestampNow();
+}
+
+void PPU::UpdateScanlineMode0(int cycles) {
+  /*
+   * Access patterns (current theory):
+   *
+   *   8BPP:
+   *    #0 - fetch map
+   *    #1 - fetch pixels #0 - #1 (16-bit)
+   *    #2 - fetch pixels #2 - #3 (16-bit)
+   *    #3 - fetch pixels #4 - #5 (16-bit)
+   *    #4 - fetch pixels #6 - #7 (16-bit)
+   *    #N - idle
+   *
+   *   4BPP:
+   *    #0 - fetch map 
+   *    #1 - fetch pixels #0 - #3 (16-bit)
+   *    #2 - idle
+   *    #3 - fetch pixels #4 - #7 (16-bit)
+   *    #4 - idle
+   *    #N - idle
+   */
 
   while (cycles-- > 0) {
     auto cycle = renderer.time & 7;
     auto id = (renderer.time & 31) >> 3;
-
-    /*
-     * Access patterns (current theory):
-     *
-     * ------- TEXT MODE -------
-     *   8BPP:
-     *    #0 - fetch map
-     *    #1 - fetch pixels #0 - #1 (16-bit)
-     *    #2 - fetch pixels #2 - #3 (16-bit)
-     *    #3 - fetch pixels #4 - #5 (16-bit)
-     *    #4 - fetch pixels #6 - #7 (16-bit)
-     *    #N - idle
-     *
-     *   4BPP:
-     *    #0 - fetch map 
-     *    #1 - fetch pixels #0 - #3 (16-bit)
-     *    #2 - idle
-     *    #3 - fetch pixels #4 - #7 (16-bit)
-     *    #4 - idle
-     *    #N - idle
-     *
-     * ------- AFFINE TEXT MDOE -------
-     *   4BPP/8BPP:
-     *    # 0 - fetch map 
-     *    # 1 - fetch single pixel
-     *    # 2 - fetch map
-     *    # 3 - fetch single pixel
-     *    # 4 - fetch map
-     *    # 5 - fetch single pixel
-     *    # 6 - fetch map
-     *    # 7 - fetch single pixel
-     *    # 8 - fetch map 
-     *    # 9 - fetch single pixel
-     *    #10 - fetch map
-     *    #11 - fetch single pixel
-     *    #12 - fetch map
-     *    #13 - fetch single pixel
-     *    #14 - fetch map
-     *    #15 - fetch single pixel
-     *
-     */
-
     auto& bg = renderer.bg[id];
 
     if (cycle == 0) {
@@ -491,14 +500,114 @@ void PPU::UpdateScanline() {
     }
 
 skip:
-    renderer.time++;
-  
     // TODO: implement this in a better way.
-    if (renderer.time == 1006) {
+    if (++renderer.time == 1006) {
       // TODO: perform horizontal mosaic operation.
       ComposeScanline(0, 3);
     }
   }
 }
+
+void PPU::UpdateScanlineMode2(int cycles) {
+  /*
+   * Access pattern (current theory):
+   *
+   *   4BPP/8BPP:
+   *    # 0 - fetch map 
+   *    # 1 - fetch single pixel
+   *    # 2 - fetch map
+   *    # 3 - fetch single pixel
+   *    # 4 - fetch map
+   *    # 5 - fetch single pixel
+   *    # 6 - fetch map
+   *    # 7 - fetch single pixel
+   *    # 8 - fetch map 
+   *    # 9 - fetch single pixel
+   *    #10 - fetch map
+   *    #11 - fetch single pixel
+   *    #12 - fetch map
+   *    #13 - fetch single pixel
+   *    #14 - fetch map
+   *    #15 - fetch single pixel
+   */
+
+  while (cycles-- > 0) {
+    auto cycle = renderer.time & 1;
+    auto id = 2 + ((renderer.time >> 4) & 2);
+    auto& bg = renderer.bg[id];
+    auto& bgcnt = mmio.bgcnt[id];
+
+    if (renderer.time == 0) {
+      // TODO: handle this properly...
+      bg.draw_x = 0;
+    }
+
+    if (cycle == 0) {
+      // TODO: implement this in a better way...
+      if (bg.draw_x == 240) {
+        bg.enabled = false;
+        goto skip;
+      }
+
+      bg.enabled = mmio.dispcnt.enable[id];
+
+      if (bg.enabled) {
+        auto x = bg.ref_x >> 8;
+        auto y = bg.ref_y >> 8;
+
+        bg.ref_x += bg.pa;
+        bg.ref_y += bg.pc;
+
+        auto size = 128 << bgcnt.size;
+
+        // TODO: optimise this...
+        if (bgcnt.wraparound) {
+          if (x >= size) {
+            x %= size;
+          } else if (x < 0) {
+            x = size + (x % size);
+          }
+          
+          if (y >= size) {
+            y %= size;
+          } else if (y < 0) {
+            y = size + (y % size);
+          }
+        } else if (x >= size || y >= size || x < 0 || y < 0) {
+          bg.enabled = false;
+        }
+
+        if (bg.enabled) {
+          auto map_base  = bgcnt.map_block << 11;
+          auto tile_base = bgcnt.tile_block << 14;
+          auto number = vram[map_base + ((y >> 3) << (4 + bgcnt.size)) + (x >> 3)];
+
+          bg.address = tile_base + (number << 6) + ((y & 7) << 3) + (x & 7);
+        }
+      }      
+    } else {
+      u16 color = s_color_transparent;
+
+      if (bg.enabled) {
+        u8 index = vram[bg.address];
+        if (index != 0) {
+          color = read<u16>(pram, index << 1);
+        }
+      }
+
+      if (bg.draw_x < 240) {
+        buffer_bg[id][bg.draw_x++] = color;
+      }
+    }
+
+skip:
+    // TODO: implement this in a better way.
+    if (++renderer.time == 1006) {
+      // TODO: perform horizontal mosaic operation.
+      ComposeScanline(0, 3);
+    }
+  }
+}
+
 
 } // namespace nba::core

@@ -171,6 +171,8 @@ private:
 
   void BeginScanline();
   void UpdateScanline();
+  void UpdateScanlineMode0(int cycles);
+  void UpdateScanlineMode2(int cycles);
 
   static auto ConvertColor(u16 color) -> u32;
 
@@ -196,12 +198,20 @@ private:
     int time;
     struct BG {
       bool enabled;
+      u32 address;
+
+      // text mode
       int grid_x;
       int draw_x;
-      u32 address;
       u16* palette;
       bool flip_x;
       bool full_palette;
+
+      // affine mode
+      s32 ref_x;
+      s32 ref_y;
+      s16 pa;
+      s16 pc;
     } bg[4];
 
     u64 timestamp;
