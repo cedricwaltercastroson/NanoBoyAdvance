@@ -200,6 +200,7 @@ private:
   struct Renderer {
     int time;
     struct BG {
+      bool engaged;
       bool enabled;
       int draw_x;
       u32 address;

@@ -277,28 +277,32 @@ void PPU::BeginScanline() {
   if (dispcnt.mode <= 2) {
     renderer.time = 0;
 
-    for (int i = 0; i < 4; i++) {
-      auto& bg = renderer.bg[i];
+    // TODO: only do what is necessary for the current mode.
+    for (int id = 0; id < 4; id++) {
+      auto& bg = renderer.bg[id];
 
-      // TODO: only run what is necessary for the current mode.
+      bg.engaged = enable_bg[0][id];
 
-      // Text mode
-      bg.grid_x = 0;
-      bg.draw_x = -(mmio.bghofs[i] & 7);
+      if (bg.engaged) {
+        // Text mode
+        bg.grid_x = 0;
+        bg.draw_x = -(mmio.bghofs[id] & 7);
 
-      // Affine modes
-      if (i >= 2) {
-        if (dispcnt.mode != 0) {
-          bg.draw_x = 0; // ugh
+        // Affine modes
+        if (id >= 2) {
+          if (dispcnt.mode != 0) {
+            bg.draw_x = 0; // ugh
+          }
+          bg.ref_x = mmio.bgx[id & 1]._current;
+          bg.ref_y = mmio.bgy[id & 1]._current;
         }
-        bg.ref_x = mmio.bgx[i & 1]._current;
-        bg.ref_y = mmio.bgy[i & 1]._current;
-      }
 
-      for (int x = 0; x < 240; x++) {
-        buffer_bg[i][x] = s_color_transparent;
+        for (int x = 0; x < 240; x++) {
+          buffer_bg[id][x] = s_color_transparent;
+        }
       }
     }
+
     renderer.timestamp = scheduler.GetTimestampNow();
   } else {
     RenderScanline();
@@ -330,6 +334,8 @@ void PPU::UpdateScanline() {
   renderer.timestamp = scheduler.GetTimestampNow();
 }
 
+// TODO: transparent pixels don't need to write to the BG buffer.
+
 void PPU::UpdateTextLayer(int id, int cycle) {
   auto& bg = renderer.bg[id];
 
@@ -354,12 +360,6 @@ void PPU::UpdateTextLayer(int id, int cycle) {
    */
 
   if (cycle == 0) {
-    // TODO: think about what happens if BGHOFS&7==0.
-    if (bg.grid_x == 31) {
-      bg.enabled = false;
-      return;
-    }
-
     bg.enabled = mmio.dispcnt.enable[id];
 
     if (bg.enabled) {
@@ -415,8 +415,6 @@ void PPU::UpdateTextLayer(int id, int cycle) {
         }
       }
     }
-
-    bg.grid_x++;
   } else if (cycle <= 4) {
     auto& address = bg.address;
 
@@ -495,6 +493,13 @@ void PPU::UpdateTextLayer(int id, int cycle) {
         address += sizeof(u16);
       }
     }
+
+    if (cycle == 4) {
+      // TODO: should we stop at 30 if BGHOFS&7==0?
+      if (++bg.grid_x == 31) {
+        bg.engaged = false;
+      }
+    }
   }
 }
 
@@ -527,12 +532,6 @@ void PPU::UpdateAffineLayer(int id, int cycle) {
    */
 
   if (cycle == 0) {
-    // TODO: implement this in a better way...
-    if (bg.draw_x == 240) {
-      bg.enabled = false;
-      return;
-    }
-
     bg.enabled = mmio.dispcnt.enable[id];
 
     if (bg.enabled) {
@@ -571,8 +570,10 @@ void PPU::UpdateAffineLayer(int id, int cycle) {
       }
     }
 
-    if (bg.draw_x < 240) {
-      buffer_bg[id][bg.draw_x++] = color;
+    buffer_bg[id][bg.draw_x] = color;
+
+    if (++bg.draw_x == 240) {
+      bg.engaged = false;
     }
   }
 
@@ -581,9 +582,11 @@ void PPU::UpdateAffineLayer(int id, int cycle) {
 void PPU::UpdateScanlineMode0(int cycles) {
   while (cycles-- > 0) {
     auto id = (renderer.time & 31) >> 3;
-    auto cycle = renderer.time & 7;
     
-    UpdateTextLayer(id, cycle);
+    if (renderer.bg[id].engaged) {
+      auto cycle = renderer.time & 7;
+      UpdateTextLayer(id, cycle);
+    }
 
     // TODO: implement this in a better way.
     // TODO: perform horizontal mosaic operation.
@@ -598,11 +601,15 @@ void PPU::UpdateScanlineMode1(int cycles) {
     auto id = (renderer.time & 31) >> 3;
 
     if (id <= 1) {
-      auto cycle = renderer.time & 7;
-      UpdateTextLayer(id, cycle);
+      if (renderer.bg[id].engaged) {
+        auto cycle = renderer.time & 7;
+        UpdateTextLayer(id, cycle);
+      }
     } else {
-      auto cycle = renderer.time & 1;
-      UpdateAffineLayer(2, cycle);
+      if (renderer.bg[2].engaged) {
+        auto cycle = renderer.time & 1;
+        UpdateAffineLayer(2, cycle);
+      }
     }
 
     // TODO: implement this in a better way.
@@ -616,9 +623,11 @@ void PPU::UpdateScanlineMode1(int cycles) {
 void PPU::UpdateScanlineMode2(int cycles) {
   while (cycles-- > 0) {
     auto id = 2 + ((renderer.time >> 4) & 1);
-    auto cycle = renderer.time & 1;
 
-    UpdateAffineLayer(id, cycle);
+    if (renderer.bg[id].engaged) {
+      auto cycle = renderer.time & 1;
+      UpdateAffineLayer(id, cycle);
+    }
     
     // TODO: implement this in a better way.
     // TODO: perform horizontal mosaic operation.
