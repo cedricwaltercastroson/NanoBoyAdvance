@@ -543,22 +543,14 @@ void PPU::UpdateAffineLayer(int id, int cycle) {
       bg.ref_y += pc;
 
       auto size = 128 << bgcnt.size;
+      auto mask = size - 1;
 
-      // TODO: optimise this...
       if (bgcnt.wraparound) {
-        if (x >= size) {
-          x %= size;
-        } else if (x < 0) {
-          x = size + (x % size);
-        }
-        
-        if (y >= size) {
-          y %= size;
-        } else if (y < 0) {
-          y = size + (y % size);
-        }
-      } else if (x >= size || y >= size || x < 0 || y < 0) {
-        bg.enabled = false;
+        x &= mask;
+        y &= mask;
+      } else {
+        // disable if either X or Y is outside the [0, size) range.
+        bg.enabled = ((x | y) & -size) == 0;
       }
 
       if (bg.enabled) {
