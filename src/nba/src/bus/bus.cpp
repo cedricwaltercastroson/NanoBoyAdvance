@@ -190,6 +190,11 @@ void Bus::Write(u32 address, Access access, T value) {
       if constexpr(std::is_same_v<T,  u8>) hw.WriteByte(address, value);
       if constexpr(std::is_same_v<T, u16>) hw.WriteHalf(address, value);
       if constexpr(std::is_same_v<T, u32>) hw.WriteWord(address, value);
+
+      if (address <= 0x0400'0056) {
+        // TODO: should we sync before or after the write?
+        hw.ppu.Sync();
+      }
       break;
     }
     // PRAM (palette RAM)

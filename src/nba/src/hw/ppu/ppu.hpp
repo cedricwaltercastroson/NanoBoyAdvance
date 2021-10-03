@@ -30,6 +30,7 @@ struct PPU {
   );
 
   void Reset();
+  void Sync();
 
   template<typename T>
   auto ALWAYS_INLINE ReadPRAM(u32 address) noexcept -> T {
@@ -43,6 +44,8 @@ struct PPU {
     } else {
       write<T>(pram, address & 0x3FF, value);
     }
+
+    Sync(); // sloooow
   }
 
   template<typename T>
@@ -69,7 +72,7 @@ struct PPU {
       write<T>(vram, address, value);
     }
 
-    UpdateScanline(); // sloooow
+    Sync(); // sloooow
   }
 
   template<typename T>
@@ -160,33 +163,26 @@ private:
   void OnVblankScanlineComplete(int cycles_late);
   void OnVblankHblankComplete(int cycles_late);
 
-  void RenderScanline();
-  void RenderLayerText(int id);
-  void RenderLayerAffine(int id);
-  void RenderLayerBitmap1();
-  void RenderLayerBitmap2();
-  void RenderLayerBitmap3();
   void RenderLayerOAM(bool bitmap_mode, int line);
   void RenderWindow(int id);
 
-  void BeginScanline();
-  void UpdateScanline();
-  void UpdateTextLayer(int id, int cycle);
-  void UpdateAffineLayer(int id, int cycle);
-  void UpdateScanlineMode0(int cycles);
-  void UpdateScanlineMode1(int cycles);
-  void UpdateScanlineMode2(int cycles);
-  void UpdateScanlineMode3(int cycles);
-  void UpdateScanlineMode4(int cycles);
-  void UpdateScanlineMode5(int cycles);
-  void UpdateScanlineMode67(int cycles);
+  void BeginRenderBG();
+  void BeginComposer(int cycles_late);
+
+  void RenderLayerText(int id, int cycle);
+  void RenderLayerAffine(int id, int cycle);
+  void RenderMode0(int cycles);
+  void RenderMode1(int cycles);
+  void RenderMode2(int cycles);
+  void RenderMode3(int cycles);
+  void RenderMode4(int cycles);
+  void RenderMode5(int cycles);
+  void RenderMode67(int cycles);
+
+  void Compose(int cycles);
+  void Blend(u16& target1, u16 target2, BlendControl::Effect sfx);
 
   static auto ConvertColor(u16 color) -> u32;
-
-  template<bool window, bool blending>
-  void ComposeScanlineTmpl(int bg_min, int bg_max);
-  void ComposeScanline(int bg_min, int bg_max);
-  void Blend(u16& target1, u16 target2, BlendControl::Effect sfx);
 
   #include "helper.inl"
 
@@ -222,6 +218,14 @@ private:
 
     u64 timestamp;
   } renderer;
+
+  struct Composer {
+    bool engaged;
+    int time;
+    int bg_min;
+    int bg_max;
+    u64 timestamp;
+  } composer;
 
   bool line_contains_alpha_obj;
 
