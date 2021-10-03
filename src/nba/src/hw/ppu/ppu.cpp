@@ -272,41 +272,35 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
 }
 
 void PPU::BeginScanline() {
-  auto& dispcnt = mmio.dispcnt;
+  renderer.time = 0;
 
-  if (dispcnt.mode <= 2) {
-    renderer.time = 0;
+  // TODO: only do what is necessary for the current mode.
+  for (int id = 0; id < 4; id++) {
+    auto& bg = renderer.bg[id];
 
-    // TODO: only do what is necessary for the current mode.
-    for (int id = 0; id < 4; id++) {
-      auto& bg = renderer.bg[id];
+    bg.engaged = enable_bg[0][id];
 
-      bg.engaged = enable_bg[0][id];
+    if (bg.engaged) {
+      // Text mode
+      bg.grid_x = 0;
+      bg.draw_x = -(mmio.bghofs[id] & 7);
 
-      if (bg.engaged) {
-        // Text mode
-        bg.grid_x = 0;
-        bg.draw_x = -(mmio.bghofs[id] & 7);
-
-        // Affine modes
-        if (id >= 2) {
-          if (dispcnt.mode != 0) {
-            bg.draw_x = 0; // ugh
-          }
-          bg.ref_x = mmio.bgx[id & 1]._current;
-          bg.ref_y = mmio.bgy[id & 1]._current;
+      // Affine modes
+      if (id >= 2) {
+        if (mmio.dispcnt.mode != 0) {
+          bg.draw_x = 0; // ugh
         }
+        bg.ref_x = mmio.bgx[id & 1]._current;
+        bg.ref_y = mmio.bgy[id & 1]._current;
+      }
 
-        for (int x = 0; x < 240; x++) {
-          buffer_bg[id][x] = s_color_transparent;
-        }
+      for (int x = 0; x < 240; x++) {
+        buffer_bg[id][x] = s_color_transparent;
       }
     }
-
-    renderer.timestamp = scheduler.GetTimestampNow();
-  } else {
-    RenderScanline();
   }
+
+  renderer.timestamp = scheduler.GetTimestampNow();
 }
 
 void PPU::UpdateScanline() {
@@ -327,8 +321,19 @@ void PPU::UpdateScanline() {
     case 2:
       UpdateScanlineMode2(cycles);
       break;
-    default:
-      Assert(false, "PPU: unimplemented mode {}", mode);
+    case 3:
+      UpdateScanlineMode3(cycles);
+      break;
+    case 4:
+      UpdateScanlineMode4(cycles);
+      break;
+    case 5:
+      UpdateScanlineMode5(cycles);
+      break;
+    case 6:
+    case 7:
+      UpdateScanlineMode67(cycles);
+      break;
   }
 
   renderer.timestamp = scheduler.GetTimestampNow();
@@ -495,7 +500,7 @@ void PPU::UpdateTextLayer(int id, int cycle) {
     }
 
     if (cycle == 4) {
-      // TODO: should we stop at 30 if BGHOFS&7==0?
+      // TODO: should we stop at 30 if (BGHOFS & 7) == 0?
       if (++bg.grid_x == 31) {
         bg.engaged = false;
       }
@@ -635,6 +640,117 @@ void PPU::UpdateScanlineMode2(int cycles) {
       ComposeScanline(0, 3);
     }
   }
+}
+
+void PPU::UpdateScanlineMode3(int cycles) {
+  // TODO: write a test ROM to figure out the actual timing.
+  while (cycles-- > 0) {
+    auto cycle = renderer.time & 31;
+
+    if (cycle < 16) {
+      auto& bg = renderer.bg[2];
+
+      if (bg.engaged && mmio.dispcnt.enable[2]) {
+        auto x = u32(bg.ref_x >> 8);
+        auto y = u32(bg.ref_y >> 8);
+
+        bg.ref_x += mmio.bgpa[0];
+        bg.ref_y += mmio.bgpc[0];
+
+        if (x < 240 && y < 160) {
+          auto index = (y * 240 + x) << 1;
+          buffer_bg[2][bg.draw_x] = read<u16>(vram, index);
+        }
+
+        if (++bg.draw_x == 240) {
+          bg.engaged = false;
+        }
+      }
+    }
+
+    // TODO: implement this in a better way.
+    // TODO: perform horizontal mosaic operation.
+    if (++renderer.time == 1006) {
+      ComposeScanline(0, 3);
+    }
+  }
+}
+
+void PPU::UpdateScanlineMode4(int cycles) {
+  // TODO: write a test ROM to figure out the actual timing.
+  while (cycles-- > 0) {
+    auto cycle = renderer.time & 31;
+
+    if (cycle < 16) {
+      auto& bg = renderer.bg[2];
+
+      if (bg.engaged && mmio.dispcnt.enable[2]) {
+        auto x = u32(bg.ref_x >> 8);
+        auto y = u32(bg.ref_y >> 8);
+
+        bg.ref_x += mmio.bgpa[0];
+        bg.ref_y += mmio.bgpc[0];
+
+        if (x < 240 && y < 160) {
+          auto frame = mmio.dispcnt.frame * 0xA000;
+          auto index = vram[frame + y * 240 + x] << 1;
+          if (index != 0) {
+            buffer_bg[2][bg.draw_x] = read<u16>(pram, index);
+          }
+        }
+
+        if (++bg.draw_x == 240) {
+          bg.engaged = false;
+        }
+      }
+    }
+
+    // TODO: implement this in a better way.
+    // TODO: perform horizontal mosaic operation.
+    if (++renderer.time == 1006) {
+      ComposeScanline(0, 3);
+    }
+  }
+}
+
+void PPU::UpdateScanlineMode5(int cycles) {
+  // TODO: write a test ROM to figure out the actual timing.
+  while (cycles-- > 0) {
+    auto cycle = renderer.time & 31;
+
+    if (cycle < 16) {
+      auto& bg = renderer.bg[2];
+
+      if (bg.engaged && mmio.dispcnt.enable[2]) {
+        auto x = u32(bg.ref_x >> 8);
+        auto y = u32(bg.ref_y >> 8);
+
+        bg.ref_x += mmio.bgpa[0];
+        bg.ref_y += mmio.bgpc[0];
+
+        if (x < 160 && y < 128) {
+          auto frame = mmio.dispcnt.frame * 0xA000;
+          auto index = frame + (y * 160 + x) << 1;
+          if (index != 0) {
+            buffer_bg[2][bg.draw_x] = read<u16>(pram, index);
+          }
+        }
+
+        if (++bg.draw_x == 240) {
+          bg.engaged = false;
+        }
+      }
+    }
+
+    // TODO: implement this in a better way.
+    // TODO: perform horizontal mosaic operation.
+    if (++renderer.time == 1006) {
+      ComposeScanline(0, 3);
+    }
+  }
+}
+
+void PPU::UpdateScanlineMode67(int cycles) {
 }
 
 } // namespace nba::core

@@ -176,6 +176,10 @@ private:
   void UpdateScanlineMode0(int cycles);
   void UpdateScanlineMode1(int cycles);
   void UpdateScanlineMode2(int cycles);
+  void UpdateScanlineMode3(int cycles);
+  void UpdateScanlineMode4(int cycles);
+  void UpdateScanlineMode5(int cycles);
+  void UpdateScanlineMode67(int cycles);
 
   static auto ConvertColor(u16 color) -> u32;
 
