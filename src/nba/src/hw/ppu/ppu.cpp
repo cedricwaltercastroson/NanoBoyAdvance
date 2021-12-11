@@ -65,6 +65,9 @@ void PPU::Reset() {
   mmio.evy = 0;
   mmio.bldcnt.Reset();
 
+  window_enable_hcount[0] = false;
+  window_enable_hcount[1] = false;
+
    // VCOUNT=225 DISPSTAT=3 was measured after reset on a 3DS in GBA mode (thanks Lady Starbreeze).
   mmio.vcount = 225;
   mmio.dispstat.vblank_flag = true;
@@ -169,13 +172,9 @@ void PPU::OnHblankComplete(int cycles_late) {
   vcount++;
   CheckVerticalCounterIRQ();
 
-  if (dispcnt.enable[ENABLE_WIN0]) {
-    RenderWindow(0);
-  }
+  Sync();
 
-  if (dispcnt.enable[ENABLE_WIN1]) {
-    RenderWindow(1);
-  }
+  UpdateWindowEnable();
 
   if (vcount == 160) {
     config->video_dev->Draw(output);
@@ -253,13 +252,7 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
     }
   }
 
-  if (mmio.dispcnt.enable[ENABLE_WIN0]) {
-    RenderWindow(0);
-  }
-
-  if (mmio.dispcnt.enable[ENABLE_WIN1]) {
-    RenderWindow(1);
-  }
+  UpdateWindowEnable();
 
   if (vcount == 0) {
     BeginRenderBG();
@@ -271,6 +264,22 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
   }
 
   CheckVerticalCounterIRQ();
+}
+
+void PPU::UpdateWindowEnable() {
+  for (int id = 0; id < 2; id++) {
+    int line = mmio.vcount;
+    auto& winv = mmio.winv[id];
+    auto& winh = mmio.winh[id];
+
+    if (line == winv.min) {
+      window_enable_vcount[id] = true;
+    }
+
+    if (line == winv.max) {
+      window_enable_vcount[id] = false;
+    }
+  }
 }
 
 void PPU::Sync() {

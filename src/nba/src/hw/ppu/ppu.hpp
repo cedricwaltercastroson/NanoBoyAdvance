@@ -164,7 +164,7 @@ private:
   void OnVblankHblankComplete(int cycles_late);
 
   void RenderLayerOAM(bool bitmap_mode, int line);
-  void RenderWindow(int id);
+  void UpdateWindowEnable();
 
   void BeginRenderBG();
   void BeginComposer(int cycles_late);
@@ -236,8 +236,8 @@ private:
     unsigned window : 1;
   } buffer_obj[240];
 
-  bool buffer_win[2][240];
-  bool window_scanline_enable[2];
+  bool window_enable_vcount[2];
+  bool window_enable_hcount[2];
 
   u32 output[240*160];
 

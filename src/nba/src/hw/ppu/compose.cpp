@@ -70,8 +70,8 @@ void PPU::Compose(int cycles) {
   bool window = dispcnt.enable[ENABLE_WIN0] ||
                 dispcnt.enable[ENABLE_WIN1] ||
                 dispcnt.enable[ENABLE_OBJWIN];
-  bool win0_active = dispcnt.enable[ENABLE_WIN0] && window_scanline_enable[0];
-  bool win1_active = dispcnt.enable[ENABLE_WIN1] && window_scanline_enable[1];
+  bool win0_active = dispcnt.enable[ENABLE_WIN0] && window_enable_vcount[0];
+  bool win1_active = dispcnt.enable[ENABLE_WIN1] && window_enable_vcount[1];
   bool win2_active = dispcnt.enable[ENABLE_OBJWIN];
 
   int prio[2];
@@ -83,95 +83,105 @@ void PPU::Compose(int cycles) {
   while (cycles-- > 0) {
     auto cycle = composer.time & 3;
 
-    // TODO: the composer can't always finish in a single cycle.. .
+    // TODO: figure out the sub-pixel compositor timing.
     if (cycle == 0) {
       auto x = composer.time >> 2;
 
+      // TODO: make this work properly during the first scanline (see win-demo.gba).
       if (window) {
-        // Determine the window with the highest priority for this pixel.
-        // TODO: think about possible optimisations here.
-        if (win0_active && buffer_win[0][x]) {
-          win_layer_enable = winin.enable[0];
-        } else if (win1_active && buffer_win[1][x]) {
-          win_layer_enable = winin.enable[1];
-        } else if (win2_active && buffer_obj[x].window) {
-          win_layer_enable = winout.enable[1];
-        } else {
-          win_layer_enable = winout.enable[0];
+        for (int id = 0; id < 2; id++) {
+          if (x == mmio.winh[id].min) window_enable_hcount[id] = true;
+          if (x == mmio.winh[id].max) window_enable_hcount[id] = false;
         }
       }
 
-      bool is_alpha_obj = false;
-
-      prio[0] = 4;
-      prio[1] = 4;
-      layer[0] = LAYER_BD;
-      layer[1] = LAYER_BD;
-      
-      // Find up to two top-most visible background pixels.
-      for (int i = 0; i < bg_count; i++) {
-        int bg = bg_list[i];
-
-        if (!window || win_layer_enable[bg]) {
-          auto pixel_new = buffer_bg[bg][x];
-          if (pixel_new != s_color_transparent) {
-            layer[1] = layer[0];
-            layer[0] = bg;
-            prio[1] = prio[0];
-            prio[0] = bgcnt[bg].priority;
+      if (x <= 239) {
+        if (window) {
+          // Determine the window with the highest priority for this pixel.
+          // TODO: think about possible optimisations here.
+          if (win0_active && window_enable_hcount[0]) {
+            win_layer_enable = winin.enable[0];
+          } else if (win1_active && window_enable_hcount[1]) {
+            win_layer_enable = winin.enable[1];
+          } else if (win2_active && buffer_obj[x].window) {
+            win_layer_enable = winout.enable[1];
+          } else {
+            win_layer_enable = winout.enable[0];
           }
         }
-      }
 
-      /* Check if a OBJ pixel takes priority over one of the two
-       * top-most background pixels and insert it accordingly.
-       */
-      if ((!window || win_layer_enable[LAYER_OBJ]) &&
-          dispcnt.enable[ENABLE_OBJ] &&
-          buffer_obj[x].color != s_color_transparent) {
-        int priority = buffer_obj[x].priority;
+        bool is_alpha_obj = false;
 
-        if (priority <= prio[0]) {
-          layer[1] = layer[0];
-          layer[0] = LAYER_OBJ;
-          is_alpha_obj = buffer_obj[x].alpha;
-        } else if (priority <= prio[1]) {
-          layer[1] = LAYER_OBJ;
+        prio[0] = 4;
+        prio[1] = 4;
+        layer[0] = LAYER_BD;
+        layer[1] = LAYER_BD;
+
+        // Find up to two top-most visible background pixels.
+        for (int i = 0; i < bg_count; i++) {
+          int bg = bg_list[i];
+
+          if (!window || win_layer_enable[bg]) {
+            auto pixel_new = buffer_bg[bg][x];
+            if (pixel_new != s_color_transparent) {
+              layer[1] = layer[0];
+              layer[0] = bg;
+              prio[1] = prio[0];
+              prio[0] = bgcnt[bg].priority;
+            }
+          }
         }
-      }
 
-      // Map layer numbers to pixels.
-      for (int i = 0; i < 2; i++) {
-        int _layer = layer[i];
-        switch (_layer) {
-          case 0 ... 3:
-            pixel[i] = buffer_bg[_layer][x];
-            break;
-          case 4:
-            pixel[i] = buffer_obj[x].color;
-            break;
-          case 5:
-            pixel[i] = read<u16>(pram, 0);
-            break;
+        /* Check if a OBJ pixel takes priority over one of the two
+         * top-most background pixels and insert it accordingly.
+         */
+        if ((!window || win_layer_enable[LAYER_OBJ]) &&
+            dispcnt.enable[ENABLE_OBJ] &&
+            buffer_obj[x].color != s_color_transparent) {
+          int priority = buffer_obj[x].priority;
+
+          if (priority <= prio[0]) {
+            layer[1] = layer[0];
+            layer[0] = LAYER_OBJ;
+            is_alpha_obj = buffer_obj[x].alpha;
+          } else if (priority <= prio[1]) {
+            layer[1] = LAYER_OBJ;
+          }
         }
-      }
 
-      if (!window || win_layer_enable[LAYER_SFX] || is_alpha_obj) {
-        auto blend_mode = mmio.bldcnt.sfx;
-        bool have_dst = mmio.bldcnt.targets[0][layer[0]];
-        bool have_src = mmio.bldcnt.targets[1][layer[1]];
-
-        if (is_alpha_obj && have_src) {
-          Blend(pixel[0], pixel[1], BlendMode::SFX_BLEND);
-        } else if (have_dst && blend_mode != BlendMode::SFX_NONE && (have_src || blend_mode != BlendMode::SFX_BLEND)) {
-          Blend(pixel[0], pixel[1], blend_mode);
+        // Map layer numbers to pixels.
+        for (int i = 0; i < 2; i++) {
+          int _layer = layer[i];
+          switch (_layer) {
+            case 0 ... 3:
+              pixel[i] = buffer_bg[_layer][x];
+              break;
+            case 4:
+              pixel[i] = buffer_obj[x].color;
+              break;
+            case 5:
+              pixel[i] = read<u16>(pram, 0);
+              break;
+          }
         }
-      }
 
-      line[x] = ConvertColor(pixel[0]);
+        if (!window || win_layer_enable[LAYER_SFX] || is_alpha_obj) {
+          auto blend_mode = mmio.bldcnt.sfx;
+          bool have_dst = mmio.bldcnt.targets[0][layer[0]];
+          bool have_src = mmio.bldcnt.targets[1][layer[1]];
+
+          if (is_alpha_obj && have_src) {
+            Blend(pixel[0], pixel[1], BlendMode::SFX_BLEND);
+          } else if (have_dst && blend_mode != BlendMode::SFX_NONE && (have_src || blend_mode != BlendMode::SFX_BLEND)) {
+            Blend(pixel[0], pixel[1], blend_mode);
+          }
+        }
+
+        line[x] = ConvertColor(pixel[0]);
+      }
     }
 
-    if (++composer.time == 960) {
+    if (++composer.time == 1186) {
       composer.engaged = false;
       break;
     }
