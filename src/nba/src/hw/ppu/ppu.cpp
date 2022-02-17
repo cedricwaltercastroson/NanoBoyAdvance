@@ -69,7 +69,7 @@ void PPU::Reset() {
   mmio.vcount = 225;
   mmio.dispstat.vblank_flag = true;
   mmio.dispstat.hblank_flag = true;
-  scheduler.Add(226, this, &PPU::OnVblankHblankComplete);
+  scheduler.Add(224, this, &PPU::OnVblankHblankComplete);
 }
 
 void PPU::LatchEnabledBGs() {
@@ -100,16 +100,23 @@ void PPU::OnScanlineComplete(int cycles_late) {
   auto& bgpd = mmio.bgpd;
   auto& mosaic = mmio.mosaic;
 
-  scheduler.Add(226 - cycles_late, this, &PPU::OnHblankComplete);
+  scheduler.Add(224 - cycles_late, this, &PPU::OnHblankComplete);
 
   mmio.dispstat.hblank_flag = 1;
 
-  if (mmio.dispstat.hblank_irq_enable) {
-    irq.Raise(IRQ::Source::HBlank);
-  }
+  scheduler.Add(2, [this](int late) {
+    if (mmio.dispstat.hblank_irq_enable) {
+      irq.Raise(IRQ::Source::HBlank);
+    }
+  });
 
-  dma.Request(DMA::Occasion::HBlank);
-  
+  /*if (mmio.dispstat.hblank_irq_enable) {
+    irq.Raise(IRQ::Source::HBlank);
+  }*/
+
+  //dma.Request(DMA::Occasion::HBlank);
+
+  // TODO: time Video DMA correctly too!!!
   if (mmio.vcount >= 2) {
     dma.Request(DMA::Occasion::Video);
   }
@@ -169,11 +176,11 @@ void PPU::OnHblankComplete(int cycles_late) {
   if (dispcnt.enable[ENABLE_WIN1]) {
     RenderWindow(1);
   }
-
+   
   if (vcount == 160) {
     config->video_dev->Draw(output);
 
-    scheduler.Add(1006 - cycles_late, this, &PPU::OnVblankScanlineComplete);
+    scheduler.Add(1008 - cycles_late, this, &PPU::OnVblankScanlineComplete);
     dma.Request(DMA::Occasion::VBlank);
     dispstat.vblank_flag = 1;
 
@@ -191,7 +198,11 @@ void PPU::OnHblankComplete(int cycles_late) {
     bgx[1]._current = bgx[1].initial;
     bgy[1]._current = bgy[1].initial;
   } else {
-    scheduler.Add(1006 - cycles_late, this, &PPU::OnScanlineComplete);
+    scheduler.Add(1006 - cycles_late, [this](int late) {
+      dma.Request(DMA::Occasion::HBlank);
+    });
+
+    scheduler.Add(1008 - cycles_late, this, &PPU::OnScanlineComplete);
     RenderScanline();
     // Render OBJs for the next scanline.
     if (mmio.dispcnt.enable[ENABLE_OBJ]) {
@@ -203,7 +214,7 @@ void PPU::OnHblankComplete(int cycles_late) {
 void PPU::OnVblankScanlineComplete(int cycles_late) {
   auto& dispstat = mmio.dispstat;
 
-  scheduler.Add(226 - cycles_late, this, &PPU::OnVblankHblankComplete);
+  scheduler.Add(224 - cycles_late, this, &PPU::OnVblankHblankComplete);
 
   dispstat.hblank_flag = 1;
 
@@ -213,9 +224,15 @@ void PPU::OnVblankScanlineComplete(int cycles_late) {
     dma.StopVideoXferDMA();
   }
 
-  if (dispstat.hblank_irq_enable) {
+  scheduler.Add(2, [this](int late) {
+    if (mmio.dispstat.hblank_irq_enable) {
+      irq.Raise(IRQ::Source::HBlank);
+    }
+  });
+
+  /*if (dispstat.hblank_irq_enable) {
     irq.Raise(IRQ::Source::HBlank);
-  }
+  }*/
 
   if (mmio.vcount >= 225) {
     /* TODO: it appears that this should really happen ~36 cycles into H-draw.
@@ -232,10 +249,14 @@ void PPU::OnVblankHblankComplete(int cycles_late) {
   dispstat.hblank_flag = 0;
 
   if (vcount == 227) {
-    scheduler.Add(1006 - cycles_late, this, &PPU::OnScanlineComplete);
+    scheduler.Add(1006 - cycles_late, [this](int late) {
+      dma.Request(DMA::Occasion::HBlank);
+    });
+
+    scheduler.Add(1008 - cycles_late, this, &PPU::OnScanlineComplete);
     vcount = 0;
   } else {
-    scheduler.Add(1006 - cycles_late, this, &PPU::OnVblankScanlineComplete);
+    scheduler.Add(1008 - cycles_late, this, &PPU::OnVblankScanlineComplete);
     if (++vcount == 227) {
       dispstat.vblank_flag = 0;
       // Render OBJs for the next scanline
