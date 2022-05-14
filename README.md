@@ -43,7 +43,7 @@ Its CPU and timing emulation is more accurate than other software emulators righ
 
 ## Compiling
 
-See [COMPILING.md](https://github.com/fleroviux/NanoboyAdvance/blob/master/docs/COMPILING.md) in the `docs` folder.
+See [COMPILING.md](https://github.com/cedricwaltercson/NanoboyAdvance/blob/master/docs/COMPILING.md) in the `docs` folder.
 
 ## Credit
 
