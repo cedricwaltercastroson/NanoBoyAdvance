@@ -90,6 +90,13 @@ pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-SDL2
 ```bash
 cd path/to/NanoBoyAdvance
 cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+or
+
+cd path/to/NanoBoyAdvance
+mkdir build
+cd build
+cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-s" -DPLATFORM_QT_STATIC=ON -DSDL2_STATIC=ON -DGLEW_USE_STATIC_LIBS=ON -DQT5_STATIC_DIR="C:/msys64/mingw64/qt5-static" ..
 ```
 
 NOTE: the location and name of the `build` directory is arbitrary.
